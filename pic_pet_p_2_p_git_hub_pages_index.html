@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>PicPet — Co-Op PWA v0.5.3 + P2P Mesh（GitHub Pages 版）</title>
+  <meta name="theme-color" content="#10b981" />
+  <link rel="icon" href="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cg%3E%3Crect width='512' height='512' fill='%2310b981'/%3E%3Ccircle cx='180' cy='220' r='20' fill='%23fff'/%3E%3Ccircle cx='332' cy='220' r='20' fill='%23fff'/%3E%3Cellipse cx='256' cy='320' rx='140' ry='110' fill='%23111827'/%3E%3C/g%3E%3C/svg%3E" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gradient-to-b from-sky-50 to-amber-50">
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="typescript,react">
+    const { useEffect, useRef, useState } = React;
+
+    // ====== 常數 ======
+    const STORAGE_KEY_BASE = "picpet_v0_state"; // 依 roomId 命名空間化
+    const HUNGER_DECAY_PER_MIN = 2;
+    const FEED_HUNGER_GAIN = 35;
+    const FEED_XP_GAIN = 22;
+    const MAX_GALLERY = 24;
+    const SW_CACHE_NAME = "picpet-pwa-cache-v2";
+
+    // ====== 小工具 ======
+    const clamp = (n,a,b)=>Math.min(b,Math.max(a,n));
+    const genRoomId = ()=>Math.random().toString(36).slice(2,8).toUpperCase();
+    const ensureRoomInURL = ()=>{const u=new URL(location.href);let r=u.searchParams.get('room');if(!r){r=genRoomId();u.searchParams.set('room',r);history.replaceState(null,'',u.toString());}return r;};
+    const storageKeyFor = (room)=>`${STORAGE_KEY_BASE}::${room}`;
+    const loadState=(room)=>{try{const raw=localStorage.getItem(storageKeyFor(room));return raw?JSON.parse(raw):null;}catch(e){return null;}};
+    const saveState=(room,data)=>{try{localStorage.setItem(storageKeyFor(room),JSON.stringify(data));}catch(e){} };
+
+    async function fileToDataURLCompressed(file,maxW=768,quality=0.85){
+      const dataURL = await new Promise((res,rej)=>{const fr=new FileReader();fr.onload=()=>res(String(fr.result));fr.onerror=rej;fr.readAsDataURL(file);});
+      return await imageDataURLToCompressed(dataURL,maxW,quality);
+    }
+    async function imageDataURLToCompressed(dataURL,maxW=768,quality=0.85){
+      const img=new Image();
+      await new Promise((res,rej)=>{img.onload=()=>res();img.onerror=()=>rej(new Error('UNSUPPORTED_IMAGE_FORMAT'));img.src=dataURL;});
+      const scale=Math.min(1,maxW/img.width);const w=Math.max(1,Math.round(img.width*scale)),h=Math.max(1,Math.round(img.height*scale));
+      const c=document.createElement('canvas');c.width=w;c.height=h;const x=c.getContext('2d');x.drawImage(img,0,0,w,h);return c.toDataURL('image/webp',quality);
+    }
+
+    function parseFeedFromHash(){const m=location.hash.match(/feed=([^&]+)/);if(!m)return null;try{const json=decodeURIComponent(escape(atob(m[1])));const o=JSON.parse(json);if(!o||o.v!==1)return null;return{roomId:String(o.roomId||''),hunger:Number(o.hunger||0),xp:Number(o.xp||0),img:String(o.img||'')}}catch{return null}}
+
+    async function shareTextURL(title,text,url){
+      if(navigator.share){try{await navigator.share({title,text,url});return true;}catch{}}
+      try{await navigator.clipboard.writeText(url);return true;}catch{return false;}
+    }
+
+    function extractRoomFromInput(input){
+      if(!input)return null;const t=input.trim();
+      try{const u=new URL(t);const q=u.searchParams.get('room');if(q&&/^[A-Za-z0-9]{4,}$/.test(q))return q.toUpperCase();}catch{}
+      const code=t.replace(/\s+/g,'').toUpperCase();return /^[A-Z0-9]{4,}$/.test(code)?code:null;
+    }
+
+    // 粒子效果
+    function ensureParticles(){const g=window;if(!Array.isArray(g._particles))g._particles=[];return g._particles}
+    function drawHeart(ctx,x,y,s,color){ctx.save();ctx.translate(x,y);ctx.scale(s/10,s/10);ctx.beginPath();ctx.moveTo(0,0);ctx.bezierCurveTo(-10,-10,-12,-28,0,-20);ctx.bezierCurveTo(12,-28,10,-10,0,0);ctx.closePath();ctx.fillStyle=color;ctx.fill();ctx.restore();}
+    function spawnHeartsNearBowl(canvas){if(!canvas)return;const dpr=Math.max(1,Math.min(2,devicePixelRatio||1));const w=canvas.clientWidth*dpr,h=canvas.clientHeight*dpr;const bx=w*0.72-10,by=h*0.74-20;const list=ensureParticles();for(let i=0;i<18;i++){list.push({x:bx+(Math.random()-0.5)*40,y:by+(Math.random()-0.5)*20,vx:(Math.random()-0.5)*1.6,vy:2+Math.random()*2,life:40+Math.random()*20});}window._particles=list;}
+
+    const assert=(n,c)=>{if(!c)throw new Error('Test failed: '+n)};
+    function simulateFeed(prev,xpGain=FEED_XP_GAIN,hungerGain=FEED_HUNGER_GAIN){let hunger=clamp(prev.hunger+hungerGain,0,100);let xp=prev.xp+xpGain;let level=prev.level;while(xp>=100){xp-=100;level+=1;}return {...prev,hunger,xp,level};}
+
+    // ====== PWA（僅供安裝 & 快取單頁） ======
+    function registerServiceWorker(){
+      if(!('serviceWorker' in navigator)) return;
+      const htmlURL = location.pathname.endsWith('.html')? location.pathname : (location.pathname.endsWith('/')? location.pathname+'index.html' : location.pathname+'/index.html');
+      const swCode = `const CACHE='${SW_CACHE_NAME}';const CORE=[self.location.origin+'${htmlURL}'];self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(CACHE).then(c=>c.addAll(CORE)).catch(()=>{}))});self.addEventListener('activate',e=>{e.waitUntil(self.clients.claim())});self.addEventListener('fetch',e=>{const r=e.request;e.respondWith(caches.match(r).then(h=>h||fetch(r).then(res=>{const cp=res.clone();caches.open(CACHE).then(c=>c.put(r,cp)).catch(()=>{});return res;}).catch(()=>h)))})`;
+      const blob=new Blob([swCode],{type:'text/javascript'}); const url=URL.createObjectURL(blob); navigator.serviceWorker.register(url).catch(()=>{});
+    }
+
+    // ====== WebRTC P2P Mesh（Host 可連多位 Guest） ======
+    const STUN = [{urls:'stun:stun.l.google.com:19302'}];
+    function b64(obj){return btoa(unescape(encodeURIComponent(JSON.stringify(obj))))}
+    function rb64(t){return JSON.parse(decodeURIComponent(escape(atob(t))))}
+
+    // Host: 多 Peer 連線管理（最小版）
+    function createHostPeer(onOpen,onMsg){
+      const pc = new RTCPeerConnection({iceServers:STUN});
+      const dc = pc.createDataChannel('picpet');
+      dc.onopen = ()=> onOpen?.(dc);
+      dc.onmessage = (e)=>{try{onMsg?.(JSON.parse(e.data), dc)}catch{}};
+      const ice = [];
+      pc.onicecandidate = (e)=>{ if(e.candidate) ice.push(e.candidate) };
+      return {pc, dc, ice};
+    }
+
+    async function buildHostOffer(bundle){
+      const {pc, ice} = bundle;
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await new Promise(r=>setTimeout(r,1200));
+      return b64({sdp:pc.localDescription, ice});
+    }
+    async function acceptHostAnswer(bundle, answerB64){
+      const {pc} = bundle; const {sdp, ice} = rb64(answerB64);
+      await pc.setRemoteDescription(sdp);
+      for(const c of (ice||[])) await pc.addIceCandidate(c);
+    }
+
+    // Guest: 單 Peer
+    async function guestConnect(offerB64, onOpen, onMsg){
+      const pc = new RTCPeerConnection({iceServers:STUN});
+      let dc = null;
+      pc.ondatachannel = (e)=>{ dc=e.channel; dc.onopen=()=>onOpen?.(dc); dc.onmessage=(ev)=>{try{onMsg?.(JSON.parse(ev.data), dc)}catch{}} };
+      const {sdp, ice} = rb64(offerB64);
+      await pc.setRemoteDescription(sdp);
+      for(const c of (ice||[])) await pc.addIceCandidate(c);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await new Promise(r=>setTimeout(r,1200));
+      return { answerB64: b64({sdp:pc.localDescription, ice:[]}), pc, dc };
+    }
+
+    // ====== 主元件 ======
+    function App(){
+      const canvasRef=useRef(null); const fileInputRef=useRef(null);
+      const [roomId,setRoomId]=useState(()=>ensureRoomInURL());
+      const [vh,setVh]=useState(0); const [dpi,setDpi]=useState(1);
+      const [gallery,setGallery]=useState([]); const [hungryBanner,setHungryBanner]=useState(false);
+      const [isEating,setIsEating]=useState(false); const [showResetConfirm,setShowResetConfirm]=useState(false);
+      const [pendingFeed,setPendingFeed]=useState({file:null,url:null}); const [incomingFeed,setIncomingFeed]=useState(null);
+      const [feedToast,setFeedToast]=useState(null); const [isFeeding,setIsFeeding]=useState(false); const [feedError,setFeedError]=useState(null);
+      const [joinInput,setJoinInput]=useState(''); const [joinToast,setJoinToast]=useState(null);
+
+      // P2P
+      const [p2pOpen,setP2pOpen]=useState(false);
+      const [role,setRole]=useState('host');
+      const [hostBundles,setHostBundles]=useState([]); // [{id, bundle:{pc,dc,ice}, offerB64, answerB64, connected}]
+      const [currentOffer,setCurrentOffer]=useState('');
+      const [currentAnswer,setCurrentAnswer]=useState('');
+      const [guestOffer,setGuestOffer]=useState('');
+      const [guestAnswer,setGuestAnswer]=useState('');
+
+      const [pet,setPet]=useState(()=>loadState(roomId)?.pet ?? {name:'水水',level:1,xp:0,hunger:75,lastTick:Date.now()});
+
+      // 基礎初始化
+      useEffect(()=>{registerServiceWorker();},[]);
+      useEffect(()=>{const d=Math.max(1,Math.min(2,devicePixelRatio||1));setDpi(d);const setSize=()=>setVh(innerHeight);setSize();addEventListener('resize',setSize);addEventListener('orientationchange',setSize);return()=>{removeEventListener('resize',setSize);removeEventListener('orientationchange',setSize);};},[]);
+      useEffect(()=>{const s=loadState(roomId);if(s?.gallery)setGallery(s.gallery); if(s?.pet) setPet(s.pet); else setPet({name:'水水',level:1,xp:0,hunger:75,lastTick:Date.now()});},[roomId]);
+      useEffect(()=>{const t=setInterval(()=>{setPet(prev=>{const now=Date.now();const dt=(now-prev.lastTick)/60000;const hunger=clamp(prev.hunger-dt*HUNGER_DECAY_PER_MIN,0,100);const next={...prev,hunger,lastTick:now};setHungryBanner(next.hunger<30);saveState(roomId,{pet:next,gallery});return next;});},5000);return()=>clearInterval(t);},[gallery,roomId]);
+      useEffect(()=>{const onStorage=(e)=>{if(e.key===storageKeyFor(roomId)&&e.newValue){try{const v=JSON.parse(e.newValue);if(v?.gallery) setGallery(v.gallery); if(v?.pet) setPet(v.pet);}catch{}}};window.addEventListener('storage',onStorage);return()=>window.removeEventListener('storage',onStorage);},[roomId]);
+
+      // Canvas 渲染
+      useEffect(()=>{const canvas=canvasRef.current;if(!canvas)return;const ctx=canvas.getContext('2d');if(!ctx)return;const render=()=>{const w=canvas.clientWidth*dpi,h=canvas.clientHeight*dpi;if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}const g=ctx.createLinearGradient(0,0,0,h);g.addColorStop(0,'#e0f2fe');g.addColorStop(1,'#fef9c3');ctx.fillStyle=g;ctx.fillRect(0,0,w,h);ctx.fillStyle='rgba(0,0,0,0.05)';ctx.fillRect(0,h*0.7,w,h*0.3);const bx=w*0.72,by=h*0.74;ctx.fillStyle='#eab308';ctx.beginPath();ctx.ellipse(bx,by,80*dpi,28*dpi,0,0,Math.PI*2);ctx.fill();ctx.fillStyle='#f59e0b';ctx.beginPath();ctx.ellipse(bx,by+10*dpi,90*dpi,30*dpi,0,0,Math.PI*2);ctx.fill();const t=Date.now()/1000;const bob=Math.sin(t*2)*4*dpi;const target=isEating?bx-110*dpi:w*0.35;window._petX=window._petX??w*0.35;const nx=window._petX+(target-window._petX)*0.1;window._petX=nx;const px=nx,py=h*0.62+bob;ctx.fillStyle='#111827';ctx.beginPath();ctx.ellipse(px,py,70*dpi,60*dpi,0,0,Math.PI*2);ctx.fill();ctx.beginPath();ctx.ellipse(px,py-80*dpi,60*dpi,50*dpi,0,0,Math.PI*2);ctx.fill();ctx.beginPath();ctx.moveTo(px-40*dpi,py-110*dpi);ctx.lineTo(px-10*dpi,py-80*dpi);ctx.lineTo(px-60*dpi,py-80*dpi);ctx.closePath();ctx.fill();ctx.beginPath();ctx.moveTo(px+40*dpi,py-110*dpi);ctx.lineTo(px+10*dpi,py-80*dpi);ctx.lineTo(px+60*dpi,py-80*dpi);ctx.closePath();ctx.fill();const blink=(Math.sin(t*5)>0.95)?0.2:1;ctx.fillStyle='#f9fafb';ctx.beginPath();ctx.ellipse(px-18*dpi,py-85*dpi,8*dpi,8*dpi*blink,0,0,Math.PI*2);ctx.ellipse(px+18*dpi,py-85*dpi,8*dpi,8*dpi*blink,0,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#f9fafb';ctx.lineWidth=2*dpi;ctx.beginPath();ctx.arc(px,py-65*dpi,10*dpi,0,Math.PI);ctx.stroke();const barW=200*dpi,bx1=14*dpi,by1=14*dpi;ctx.fillStyle='rgba(0,0,0,0.15)';ctx.fillRect(bx1,by1,barW,18*dpi);ctx.fillStyle=pet.hunger>30?'#22c55e':'#ef4444';ctx.fillRect(bx1,by1,(barW*pet.hunger)/100,18*dpi);ctx.fillStyle='#111827';ctx.font=`${13*dpi}px system-ui, -apple-system, Segoe UI, Roboto`;ctx.fillText(`房間 ${roomId}｜飢餓 ${Math.round(pet.hunger)} / 100`,bx1,by1+34*dpi);ctx.fillText(`Lv.${pet.level}  XP ${Math.round(pet.xp)} / 100`,bx1,by1+52*dpi);const ps=ensureParticles();for(const p of ps){p.x+=p.vx;p.y+=p.vy;p.vy-=0.12*dpi;p.life-=1}window._particles=ps.filter(p=>p.life>0);for(const p of ensureParticles()){drawHeart(ctx,p.x,p.y,6*dpi,`rgba(239, 68, 68, ${Math.max(0,p.life/40)})`)}requestAnimationFrame(render)};const id=requestAnimationFrame(render);return()=>cancelAnimationFrame(id);},[dpi,pet,isEating,roomId]);
+
+      // P2P: 送出目前狀態給所有連線
+      const peerSendAll = (obj)=>{
+        hostBundles.forEach(x=>{const dc=x.bundle?.dc; if(dc&&dc.readyState==='open'){ try{dc.send(JSON.stringify(obj))}catch{} }});
+      };
+      const broadcastState = ()=>{ peerSendAll({type:'state', roomId, data:{pet, gallery}}); };
+
+      // 餵食後儲存並同步
+      const handleFeed=async (fileOrDataURL)=>{const data=typeof fileOrDataURL==='string'?await imageDataURLToCompressed(fileOrDataURL,768,0.85):await fileToDataURLCompressed(fileOrDataURL);setGallery(prev=>{const next=[data,...prev].slice(0,MAX_GALLERY);saveState(roomId,{pet,gallery:next}); return next;});setPet(prev=>{const next=simulateFeed(prev);saveState(roomId,{pet:next,gallery:[data,...gallery].slice(0,MAX_GALLERY)}); return next;});setIsEating(true);spawnHeartsNearBowl(canvasRef.current);setTimeout(()=>setIsEating(false),1200); setTimeout(broadcastState,80); return data;};
+
+      const onPickFile=async (e)=>{const input=e.currentTarget;const f=input.files?.[0];if(f){try{const preview=await new Promise((res,rej)=>{const fr=new FileReader();fr.onload=()=>res(String(fr.result));fr.onerror=rej;fr.readAsDataURL(f);});setPendingFeed({file:f,url:preview});setFeedError(null);}catch(err){setFeedError('預覽失敗，請改用 JPG/PNG 再試一次');}} if(input) input.value='';};
+      const cancelFeed=()=>{setPendingFeed({file:null,url:null});setFeedError(null);};
+      const confirmFeed=async ()=>{if(!pendingFeed.file||isFeeding)return;setIsFeeding(true);try{await handleFeed(pendingFeed.file);setPendingFeed({file:null,url:null});setFeedToast({xp:FEED_XP_GAIN,hunger:FEED_HUNGER_GAIN});setTimeout(()=>setFeedToast(null),1600);setFeedError(null);}catch(err){setFeedError('餵食失敗，請重試。');}finally{setIsFeeding(false);}};
+
+      const buildInviteLink=()=>{const u=new URL(location.href);u.searchParams.set('room',roomId);u.hash='';return u.toString();};
+      const onInviteClick=async ()=>{const ok=await shareTextURL('一起養水水','用這個連結加入同一房間：',buildInviteLink());if(ok){setJoinToast('已複製/分享連結');setTimeout(()=>setJoinToast(null),1200);}};
+
+      const onJoinByInput=()=>{const code=extractRoomFromInput(joinInput);if(!code){setJoinToast('邀請碼/連結格式不正確');setTimeout(()=>setJoinToast(null),1500);return;}setRoomId(code);const u=new URL(location.href);u.searchParams.set('room',code);u.hash='';history.replaceState(null,'',u.toString());setJoinToast(`已加入房間 ${code}`);setTimeout(()=>setJoinToast(null),1200);setJoinInput('');};
+
+      useEffect(()=>{const parsed=parseFeedFromHash();if(parsed){setIncomingFeed(parsed)}},[]);
+      const acceptIncomingFeed=async ()=>{if(!incomingFeed)return;if(incomingFeed.roomId!==roomId){setRoomId(incomingFeed.roomId);const u=new URL(location.href);u.searchParams.set('room',incomingFeed.roomId);history.replaceState(null,'',u.toString());}await handleFeed(incomingFeed.img);setFeedToast({xp:incomingFeed.xp||FEED_XP_GAIN,hunger:incomingFeed.hunger||FEED_HUNGER_GAIN});setTimeout(()=>setFeedToast(null),1600);setIncomingFeed(null);history.replaceState(null,'',location.pathname+location.search);};
+
+      useEffect(()=>{saveState(roomId,{pet,gallery});},[pet,gallery,roomId]);
+
+      // 接收 P2P 訊息（Host 端）
+      const onPeerMessage = (msg, dc)=>{
+        if(msg?.type==='state'){
+          if(msg.roomId && msg.roomId!==roomId) return;
+          const {pet:pp, gallery:gg} = msg.data||{};
+          if(pp) setPet(pp);
+          if(gg) setGallery(gg);
+          saveState(roomId,{pet:pp||pet, gallery:gg||gallery});
+          // 轉發給其他人（mesh 最小版）
+          hostBundles.forEach(x=>{if(x.bundle?.dc!==dc && x.bundle?.dc?.readyState==='open'){try{x.bundle.dc.send(JSON.stringify(msg))}catch{}}});
+        }
+      };
+
+      // Host: 新增一條連線（供新來賓使用）
+      const hostAddLink = async ()=>{
+        const id = Math.random().toString(36).slice(2,8).toUpperCase();
+        const bundle = createHostPeer(()=>{}, onPeerMessage);
+        const offerB64 = await buildHostOffer(bundle);
+        setHostBundles(prev=>[...prev,{id, bundle, offerB64, answerB64:'', connected:false}]);
+        setCurrentOffer(offerB64); setCurrentAnswer('');
+      };
+      const hostApplyAnswer = async ()=>{
+        try{
+          const idx = hostBundles.findIndex(x=>x.offerB64===currentOffer);
+          if(idx<0) throw new Error('請先產生 Offer');
+          await acceptHostAnswer(hostBundles[idx].bundle, currentAnswer.trim());
+          hostBundles[idx].connected = true;
+          setHostBundles([...hostBundles]);
+          // 初次同步狀態給新客戶端
+          try{ hostBundles[idx].bundle.dc.send(JSON.stringify({type:'state', roomId, data:{pet, gallery}})); }catch{}
+        }catch(e){ alert('Answer 格式錯誤或時序不正確'); }
+      };
+
+      // Guest: 連線流程
+      const guestGo = async ()=>{
+        try{
+          const { answerB64 } = await guestConnect(guestOffer.trim(), (dc)=>{
+            // 連線成功後，請對方也會推一次狀態
+          }, onPeerMessage);
+          setGuestAnswer(answerB64);
+        }catch(e){ alert('Offer 格式錯誤'); }
+      };
+
+      const safeBottom = `calc(env(safe-area-inset-bottom, 0px))`;
+      const canvasHeight = Math.max(280, Math.floor(vh * 0.55));
+
+      return (
+        <div className="w-full min-h-[100vh] text-slate-800">
+          <div className="max-w-[640px] mx-auto">
+            <header className="px-4 pt-4 pb-2 flex items-center justify-between">
+              <div>
+                <h1 className="text-xl font-bold">PicPet — Co-Op + P2P Mesh</h1>
+                <p className="text-xs opacity-70">房間：<span className="font-mono">{roomId}</span>｜多人共養（無伺服器）</p>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => fileInputRef?.current?.click()} className="px-3 py-2 rounded-2xl shadow bg-emerald-500 text-white text-sm">餵一張</button>
+                <button onClick={onInviteClick} className="px-3 py-2 rounded-2xl shadow bg-indigo-600 text-white text-sm">邀請</button>
+                <button onClick={()=>setP2pOpen(true)} className="px-3 py-2 rounded-2xl shadow bg-fuchsia-600 text-white text-sm">P2P 同步</button>
+              </div>
+            </header>
+
+            <div className="px-4">
+              <div className="rounded-2xl bg-white shadow p-3 flex gap-2 items-center">
+                <input value={joinInput} onChange={(e)=>setJoinInput(e.target.value)} placeholder="輸入邀請碼或連結 (例：AB12CD 或 ?room=...)" className="flex-1 text-sm px-3 py-2 rounded-xl border border-slate-200" />
+                <button onClick={onJoinByInput} className="px-3 py-2 rounded-xl bg-slate-800 text-white text-sm">加入</button>
+              </div>
+              {joinToast && (<div className="mt-2 text-xs px-3 py-2 rounded-xl bg-emerald-50 text-emerald-700">{joinToast}</div>)}
+            </div>
+
+            <div className="px-4 mt-3">
+              <div className="rounded-3xl shadow-lg bg-white p-3">
+                <div className="relative w-full overflow-hidden rounded-2xl border border-slate-100" style={{ height: canvasHeight }}>
+                  <canvas ref={canvasRef} className="w-full h-full" />
+                </div>
+                <div className="flex items-center justify-between px-1 pt-3">
+                  <div className="text-sm opacity-80">名字：<span className="font-semibold">{pet.name}</span>｜等級：<span className="font-semibold">{pet.level}</span></div>
+                  <div className="text-sm opacity-80">XP：{Math.round(pet.xp)}/100｜飢餓：{Math.round(pet.hunger)}/100</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-4 mt-3">
+              <div className="rounded-3xl shadow-lg bg-white p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-base font-semibold">相片牆（{gallery.length}）</h2>
+                  <div className="flex gap-2">
+                    <button onClick={() => fileInputRef?.current?.click()} className="px-3 py-1.5 rounded-xl bg-emerald-500 text-white text-xs shadow">+ 餵照片</button>
+                    <button onClick={()=>setP2pOpen(true)} className="px-3 py-1.5 rounded-xl bg-fuchsia-600 text-white text-xs shadow">P2P 同步</button>
+                  </div>
+                </div>
+                {gallery.length === 0 ? (
+                  <p className="text-sm opacity-70">還沒有照片。點上方按鈕選擇檔案或開相機拍一張吧！</p>
+                ) : (
+                  <div className="grid grid-cols-3 gap-2">
+                    {gallery.map((src, i) => (
+                      <div key={i} className="relative w-full aspect-square overflow-hidden rounded-xl border border-slate-100">
+                        <img src={src} alt={`pic-${i}`} className="absolute inset-0 w-full h-full object-cover" />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* 檔案輸入 */}
+            <input ref={fileInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={onPickFile} />
+
+            {/* 餵食確認視窗 */}
+            {pendingFeed.url && (
+              <div className="fixed inset-0 bg-black/45 backdrop-blur-sm flex items-center justify-center z-50">
+                <div className="bg-white rounded-2xl p-4 w-[92vw] max-w-sm shadow-xl">
+                  <h3 className="font-semibold mb-2">餵食確認</h3>
+                  <div className="w-full aspect-square rounded-xl overflow-hidden border mb-3">
+                    <img src={pendingFeed.url || ''} className="w-full h-full object-cover" alt="preview" />
+                  </div>
+                  <div className="flex gap-2 justify-between items-center">
+                    <button onClick={cancelFeed} className="px-4 py-3 rounded-xl bg-slate-200 text-sm">取消</button>
+                    <button onClick={confirmFeed} disabled={isFeeding} className={`${isFeeding ? 'bg-emerald-300' : 'bg-emerald-600'} px-4 py-3 rounded-xl text-white text-sm`}>餵給水水</button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 入站餵食確認視窗 */}
+            {incomingFeed && (
+              <div className="fixed inset-0 bg-black/45 backdrop-blur-sm flex items-center justify-center z-50">
+                <div className="bg-white rounded-2xl p-4 w-[92vw] max-w-sm shadow-xl">
+                  <h3 className="font-semibold mb-2">接受好友的餵食？</h3>
+                  <p className="text-xs opacity-70 mb-2">來源房間：<span className="font-mono">{incomingFeed.roomId}</span>{incomingFeed.roomId !== roomId ? '（將切換到該房間）' : ''}</p>
+                  <div className="w-full aspect-square rounded-XL overflow-hidden border mb-3">
+                    <img src={incomingFeed.img} className="w-full h-full object-cover" alt="shared" />
+                  </div>
+                  <div className="text-sm opacity-80 mb-2">效果：+{incomingFeed.hunger || FEED_HUNGER_GAIN} 飢餓、+{incomingFeed.xp || FEED_XP_GAIN} XP</div>
+                  <div className="flex gap-2 justify-end">
+                    <button onClick={()=>{setIncomingFeed(null)}} className="px-4 py-3 rounded-xl bg-slate-200 text-sm">先不要</button>
+                    <button onClick={acceptIncomingFeed} className="px-4 py-3 rounded-xl bg-emerald-600 text-white text-sm">接受套用</button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* P2P 面板 */}
+            {p2pOpen && (
+              <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+                <div className="bg-white rounded-2xl w-[92vw] max-w-lg p-4 shadow-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="font-semibold">P2P 同步（不需伺服器、Host 可連多位 Guest）</h3>
+                    <button className="text-sm px-2 py-1 bg-slate-200 rounded" onClick={()=>setP2pOpen(false)}>關閉</button>
+                  </div>
+
+                  <div className="flex gap-2 mb-3">
+                    <button onClick={()=>setRole('host')} className={`px-3 py-2 rounded ${role==='host'?'bg-fuchsia-600 text-white':'bg-slate-200'}`}>① 我當主機</button>
+                    <button onClick={()=>setRole('guest')} className={`px-3 py-2 rounded ${role==='guest'?'bg-fuchsia-600 text-white':'bg-slate-200'}`}>② 我加入</button>
+                  </div>
+
+                  {role==='host' ? (
+                    <>
+                      <div className="mb-2 flex gap-2">
+                        <button onClick={hostAddLink} className="px-3 py-2 rounded bg-slate-800 text-white text-sm">新增連線（產生 Offer）</button>
+                        <button onClick={hostApplyAnswer} className="px-3 py-2 rounded bg-emerald-600 text-white text-sm">套用 Answer</button>
+                        <button onClick={broadcastState} className="px-3 py-2 rounded bg-fuchsia-600 text-white text-sm">廣播目前狀態</button>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2">
+                        <textarea className="w-full h-24 p-2 border rounded font-mono text-xs" value={currentOffer} onChange={(e)=>setCurrentOffer(e.target.value)} placeholder="（主機）複製這段 Offer 給來賓"></textarea>
+                        <textarea className="w-full h-24 p-2 border rounded font-mono text-xs" value={currentAnswer} onChange={(e)=>setCurrentAnswer(e.target.value)} placeholder="（主機）把來賓給的 Answer 貼在這裡，再按『套用 Answer』"></textarea>
+                      </div>
+                      <div className="mt-2 text-xs opacity-70">
+                        已建立連線：{hostBundles.filter(x=>x.connected).length} 位（建議 ≤ 4 位以免網路負擔）
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="mb-2 flex gap-2">
+                        <button onClick={guestGo} className="px-3 py-2 rounded bg-slate-800 text-white text-sm">產生 Answer</button>
+                        <button onClick={broadcastState} className="px-3 py-2 rounded bg-fuchsia-600 text-white text-sm">要求對方同步</button>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2">
+                        <textarea className="w-full h-24 p-2 border rounded font-mono text-xs" value={guestOffer} onChange={(e)=>setGuestOffer(e.target.value)} placeholder="（來賓）把主機的 Offer 貼在這裡"></textarea>
+                        <textarea className="w-full h-24 p-2 border rounded font-mono text-xs" value={guestAnswer} onChange={(e)=>setGuestAnswer(e.target.value)} placeholder="（來賓）這裡會產生 Answer，複製回主機"></textarea>
+                      </div>
+                    </>
+                  )}
+
+                  <div className="mt-3 text-[11px] opacity-60">提示：請雙方都用 <b>HTTPS</b> 並打開同一個網址與房間碼（?room=XXXX）。主機可依序為每位來賓產生一個 Offer，套用每位的 Answer 後即可形成小型 Mesh。</div>
+                </div>
+              </div>
+            )}
+
+            {hungryBanner && (<div className="mx-4 my-2 p-3 rounded-xl bg-rose-100 text-rose-700 font-medium shadow">🐱 水水肚子餓了！快餵牠一張照片～</div>)}
+            {feedToast && (<div className="fixed top-4 right-4 z-40 bg-emerald-600 text-white px-3 py-2 rounded-xl shadow">+{feedToast.hunger} 飢餓, +{feedToast.xp} XP</div>)}
+            {feedError && (<div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-rose-600 text-white px-3 py-2 rounded-xl shadow max-w-[90vw] text-sm">{feedError}</div>)}
+
+            <footer className="px-4 py-8 text-[11px] opacity-60">
+              <p>此為 GitHub Pages 單檔版（HTTPS）。支援 Host 多人（建議 ≦4）。未使用伺服器，資料僅在 P2P 與本機儲存。</p>
+            </footer>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
