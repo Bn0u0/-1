@@ -162,11 +162,25 @@
       const confirmFeed=async ()=>{if(!pendingFeed.file||isFeeding)return;setIsFeeding(true);try{await handleFeed(pendingFeed.file);setPendingFeed({file:null,url:null});setFeedToast({xp:FEED_XP_GAIN,hunger:FEED_HUNGER_GAIN});setTimeout(()=>setFeedToast(null),1600);setFeedError(null);}catch(err){setFeedError('餵食失敗，請重試。');}finally{setIsFeeding(false);}};
 
       const buildInviteLink=()=>{const u=new URL(location.href);u.searchParams.set('room',roomId);u.hash='';return u.toString();};
-      const onInviteClick=async ()=>{const ok=await shareTextURL('一起養水水','用這個連結加入同一房間：',buildInviteLink());if(ok){setJoinToast('已複製/分享連結');setTimeout(()=>setJoinToast(null),1200);}};
+      const onInviteClick = async () => {
+        // 一鍵邀請：建立 Host 端連線並把 Offer 放進連結的 hash
+        const bundle = createHostPeer(()=>{}, onPeerMessage);
+        const offerB64 = await buildHostOffer(bundle);
+        window._easyHostBundle = bundle;
+        const u = new URL(location.href);
+        u.searchParams.set('room', roomId);
+        u.hash = 'o=' + encodeURIComponent(offerB64);
+        const ok = await shareTextURL('一起養水水','點開連結即可加入（會自動產生回覆）', u.toString());
+        try{ await navigator.clipboard.writeText(u.toString()); }catch{}
+        setJoinToast('已複製邀請連結');
+        setTimeout(()=>setJoinToast(null),1200);
+      };
 
       const onJoinByInput=()=>{const code=extractRoomFromInput(joinInput);if(!code){setJoinToast('邀請碼/連結格式不正確');setTimeout(()=>setJoinToast(null),1500);return;}setRoomId(code);const u=new URL(location.href);u.searchParams.set('room',code);u.hash='';history.replaceState(null,'',u.toString());setJoinToast(`已加入房間 ${code}`);setTimeout(()=>setJoinToast(null),1200);setJoinInput('');};
 
       useEffect(()=>{const parsed=parseFeedFromHash();if(parsed){setIncomingFeed(parsed)}},[]);
+      function getHashParam(name){ const m = location.hash.match(new RegExp(name+'=([^&]+)')); return m? decodeURIComponent(m[1]) : null; }
+      useEffect(()=>{ const handler = async()=>{ const o=getHashParam('o'); const a=getHashParam('a'); if(o){ try{ const {answerB64}= await guestConnect(o, ()=>{}, onPeerMessage); const u=new URL(location.href); u.hash = 'a=' + encodeURIComponent(answerB64); try{ await navigator.clipboard.writeText(u.toString()); }catch{} await shareTextURL('回傳加入連結','把這個連結貼給主機完成同步：', u.toString()); setJoinToast('已複製回傳連結'); setTimeout(()=>setJoinToast(null),1800);}catch(e){ setJoinToast('邀請連結無效'); setTimeout(()=>setJoinToast(null),1500);} } else if(a && window._easyHostBundle){ try{ await acceptHostAnswer(window._easyHostBundle, a); setJoinToast('✅ 已連線'); setTimeout(()=>setJoinToast(null),1200);}catch(e){ setJoinToast('回連結格式錯誤'); setTimeout(()=>setJoinToast(null),1500);} history.replaceState(null,'', location.pathname + location.search);} }; handler(); const h=()=>handler(); window.addEventListener('hashchange', h); return ()=>window.removeEventListener('hashchange', h); },[roomId]);
       const acceptIncomingFeed=async ()=>{if(!incomingFeed)return;if(incomingFeed.roomId!==roomId){setRoomId(incomingFeed.roomId);const u=new URL(location.href);u.searchParams.set('room',incomingFeed.roomId);history.replaceState(null,'',u.toString());}await handleFeed(incomingFeed.img);setFeedToast({xp:incomingFeed.xp||FEED_XP_GAIN,hunger:incomingFeed.hunger||FEED_HUNGER_GAIN});setTimeout(()=>setFeedToast(null),1600);setIncomingFeed(null);history.replaceState(null,'',location.pathname+location.search);};
 
       useEffect(()=>{saveState(roomId,{pet,gallery});},[pet,gallery,roomId]);
@@ -229,7 +243,7 @@
               </div>
               <div className="flex gap-2">
                 <button onClick={() => fileInputRef?.current?.click()} className="px-3 py-2 rounded-2xl shadow bg-emerald-500 text-white text-sm">餵一張</button>
-                <button onClick={()=>setP2pOpen(true)} className="px-3 py-2 rounded-2xl shadow bg-fuchsia-600 text-white text-sm">P2P 同步</button>
+                <button onClick={onInviteClick} className="px-3 py-2 rounded-2xl shadow bg-indigo-600 text-white text-sm">邀請</button>
               </div>
             </header>
 
@@ -259,7 +273,7 @@
                   <h2 className="text-base font-semibold">相片牆（{gallery.length}）</h2>
                   <div className="flex gap-2">
                     <button onClick={() => fileInputRef?.current?.click()} className="px-3 py-1.5 rounded-xl bg-emerald-500 text-white text-xs shadow">+ 餵照片</button>
-                    <button onClick={()=>setP2pOpen(true)} className="px-3 py-1.5 rounded-xl bg-fuchsia-600 text-white text-xs shadow">P2P 同步</button>
+                    <button onClick={onInviteClick} className="px-3 py-1.5 rounded-xl bg-indigo-600 text-white text-xs shadow">邀請</button>
                   </div>
                 </div>
                 {gallery.length === 0 ? (
