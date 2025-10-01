@@ -191,6 +191,7 @@
         const offerB64 = await buildHostOffer(bundle);
         setHostBundles(prev=>[...prev,{id, bundle, offerB64, answerB64:'', connected:false}]);
         setCurrentOffer(offerB64); setCurrentAnswer('');
+        try{ await navigator.clipboard.writeText(offerB64); }catch{}
       };
       const hostApplyAnswer = async ()=>{
         try{
@@ -211,6 +212,7 @@
             // 連線成功後，請對方也會推一次狀態
           }, onPeerMessage);
           setGuestAnswer(answerB64);
+          try{ await navigator.clipboard.writeText(answerB64); }catch{}
         }catch(e){ alert('Offer 格式錯誤'); }
       };
 
@@ -227,7 +229,6 @@
               </div>
               <div className="flex gap-2">
                 <button onClick={() => fileInputRef?.current?.click()} className="px-3 py-2 rounded-2xl shadow bg-emerald-500 text-white text-sm">餵一張</button>
-                <button onClick={onInviteClick} className="px-3 py-2 rounded-2xl shadow bg-indigo-600 text-white text-sm">邀請</button>
                 <button onClick={()=>setP2pOpen(true)} className="px-3 py-2 rounded-2xl shadow bg-fuchsia-600 text-white text-sm">P2P 同步</button>
               </div>
             </header>
@@ -331,8 +332,7 @@
                       <div className="mb-2 flex gap-2">
                         <button onClick={hostAddLink} className="px-3 py-2 rounded bg-slate-800 text-white text-sm">新增連線（產生 Offer）</button>
                         <button onClick={hostApplyAnswer} className="px-3 py-2 rounded bg-emerald-600 text-white text-sm">套用 Answer</button>
-                        <button onClick={broadcastState} className="px-3 py-2 rounded bg-fuchsia-600 text-white text-sm">廣播目前狀態</button>
-                      </div>
+                        </div>
                       <div className="grid grid-cols-1 gap-2">
                         <textarea className="w-full h-24 p-2 border rounded font-mono text-xs" value={currentOffer} onChange={(e)=>setCurrentOffer(e.target.value)} placeholder="（主機）複製這段 Offer 給來賓"></textarea>
                         <textarea className="w-full h-24 p-2 border rounded font-mono text-xs" value={currentAnswer} onChange={(e)=>setCurrentAnswer(e.target.value)} placeholder="（主機）把來賓給的 Answer 貼在這裡，再按『套用 Answer』"></textarea>
@@ -345,8 +345,7 @@
                     <>
                       <div className="mb-2 flex gap-2">
                         <button onClick={guestGo} className="px-3 py-2 rounded bg-slate-800 text-white text-sm">產生 Answer</button>
-                        <button onClick={broadcastState} className="px-3 py-2 rounded bg-fuchsia-600 text-white text-sm">要求對方同步</button>
-                      </div>
+                        </div>
                       <div className="grid grid-cols-1 gap-2">
                         <textarea className="w-full h-24 p-2 border rounded font-mono text-xs" value={guestOffer} onChange={(e)=>setGuestOffer(e.target.value)} placeholder="（來賓）把主機的 Offer 貼在這裡"></textarea>
                         <textarea className="w-full h-24 p-2 border rounded font-mono text-xs" value={guestAnswer} onChange={(e)=>setGuestAnswer(e.target.value)} placeholder="（來賓）這裡會產生 Answer，複製回主機"></textarea>
